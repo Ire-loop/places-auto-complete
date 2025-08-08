@@ -71,6 +71,43 @@ Android application demonstrating Google Places SDK Autocomplete integration wit
 - **Hilt**: 2.57 for dependency injection
 - **Min SDK**: 28 / Target SDK: 36
 
+### Layered Architecture
+```
+┌─────────────────────────────────────┐
+│         Presentation Layer          │
+│    (Compose UI + ViewModels)        │
+├─────────────────────────────────────┤
+│          Domain Layer               │
+│    (Use Cases + Domain Models)      │
+├─────────────────────────────────────┤
+│           Data Layer                │
+│  (Repositories + Data Sources)      │
+└─────────────────────────────────────┘
+```
+
+### Unidirectional Data Flow (UDF)
+```kotlin
+// ViewModel emits state
+data class SearchUiState(
+    val query: String = "",
+    val results: List<Place> = emptyList(),
+    val isLoading: Boolean = false,
+    val error: String? = null
+)
+
+// UI observes state
+val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+
+// User actions trigger events
+viewModel.onSearchQueryChanged(query)
+
+// ViewModel processes events and updates state
+fun onSearchQueryChanged(query: String) {
+    _uiState.update { it.copy(query = query) }
+    searchPlaces(query)
+}
+```
+
 ### API Key Configuration
 The project uses the Secrets Gradle Plugin for API key management:
 1. API keys are stored in `secrets.properties` (not in version control)
