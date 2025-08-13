@@ -8,7 +8,6 @@ pluginManagement {
             }
         }
         gradlePluginPortal()
-        google()
         mavenCentral()
     }
 }
@@ -22,3 +21,6 @@ dependencyResolutionManagement {
 
 rootProject.name = "Places Autocomplete Demo"
 include(":app")
+include(":core-network")
+include(":core-domain")
+include(":core-data")
