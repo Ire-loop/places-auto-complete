@@ -18,7 +18,7 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         consumerProguardFiles("consumer-rules.pro")
         
-        buildConfigField("String", "BASE_URL", "\"https://maps.googleapis.com/\"")
+        buildConfigField("String", "ROUTES_BASE_URL", "\"https://routes.googleapis.com/\"")
     }
 
     buildTypes {
@@ -45,6 +45,8 @@ android {
 }
 
 dependencies {
+
+    implementation(project(":core-domain"))
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)
