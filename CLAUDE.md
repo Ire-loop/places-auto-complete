@@ -38,10 +38,15 @@ Android application demonstrating Google Places SDK Autocomplete integration wit
 ./gradlew :app:test
 ./gradlew :core-network:test
 ./gradlew :core-domain:test
+./gradlew :core-data:test
 
 # Run network-specific tests
 ./gradlew :core-network:test --tests "*NetworkTest"
 ./gradlew :core-domain:test --tests "*RepositoryTest"
+
+# Run data layer tests
+./gradlew :core-data:test --tests "*DaoTest"
+./gradlew :core-data:connectedAndroidTest
 ```
 
 ### Code Quality
@@ -57,6 +62,9 @@ Android application demonstrating Google Places SDK Autocomplete integration wit
 
 # Check network module specifically
 ./gradlew :core-network:lint
+
+# Check data module
+./gradlew :core-data:lint
 ```
 
 ## Architecture
@@ -80,6 +88,14 @@ Android application demonstrating Google Places SDK Autocomplete integration wit
   - Result sealed class for error handling
   - Coroutines Flow for reactive data streams
 
+- **core-data**: Data persistence and caching layer
+  - Room database for local storage of places and search history
+  - DataStore for user preferences and settings
+  - Repository implementations bridging network and local data sources
+  - Data mappers for entity transformations
+  - Caching strategies with TTL (Time To Live) management
+  - Android Keystore integration for sensitive data encryption
+
 ### Key Dependencies & Versions
 - **Kotlin**: 2.2.0 with Compose compiler
 - **Android Gradle Plugin**: 8.12.0
@@ -89,6 +105,8 @@ Android application demonstrating Google Places SDK Autocomplete integration wit
 - **Retrofit**: 2.9.0 with Scalars converter
 - **OkHttp**: 4.12.0 with logging interceptor
 - **Coroutines**: 1.7.3 for async operations
+- **Room**: 2.6.1 for database
+- **DataStore**: 1.0.0 for preferences
 - **Min SDK**: 28 / Target SDK: 36
 
 ### Layered Architecture
@@ -102,7 +120,443 @@ Android application demonstrating Google Places SDK Autocomplete integration wit
 ├─────────────────────────────────────┤
 │           Data Layer                │
 │  (Network APIs + Data Sources)      │
+│  ┌─────────────────────────────────┐│
+│  │     core-data module            ││
+│  │  - Room Database                ││
+│  │  - DataStore Preferences        ││
+│  │  - Repository Implementations   ││
+│  │  - Data Mappers                 ││
+│  │  - Caching Logic                ││
+│  └─────────────────────────────────┘│
 └─────────────────────────────────────┘
+```
+
+## Core-Data Module
+
+### Module Overview
+The `core-data` module is responsible for all data persistence, caching, and concrete repository implementations. It acts as the single source of truth for the application's data, coordinating between network and local storage.
+
+### Module Structure
+```
+core-data/
+├── src/main/java/com/places/autocomplete/core/data/
+│   ├── database/
+│   │   ├── PlacesDatabase.kt          # Room database definition
+│   │   ├── dao/
+│   │   │   ├── PlacesDao.kt           # DAO for places operations
+│   │   │   └── SearchHistoryDao.kt    # DAO for search history
+│   │   ├── entities/
+│   │   │   ├── PlaceEntity.kt         # Database entity for places
+│   │   │   ├── SearchHistoryEntity.kt # Database entity for search history
+│   │   │   └── CachedLocationEntity.kt # Cached geocoding results
+│   │   └── converters/
+│   │       └── Converters.kt          # Type converters for Room
+│   ├── datastore/
+│   │   ├── UserPreferencesSerializer.kt # Proto DataStore serializer
+│   │   ├── PreferencesRepository.kt     # DataStore repository
+│   │   └── proto/                       # Protocol buffer definitions
+│   ├── repository/
+│   │   ├── PlacesRepositoryImpl.kt     # Concrete repository implementation
+│   │   ├── GeocodingRepositoryImpl.kt  # Geocoding with caching
+│   │   └── SearchHistoryRepositoryImpl.kt # Search history management
+│   ├── mappers/
+│   │   ├── PlaceMapper.kt              # Entity <-> Domain model mapping
+│   │   └── LocationMapper.kt           # Location data transformations
+│   ├── di/
+│   │   └── DataModule.kt               # Hilt dependency injection
+│   └── util/
+│       ├── CacheManager.kt             # Cache invalidation logic
+│       └── EncryptionHelper.kt         # Android Keystore encryption
+└── build.gradle.kts
+```
+
+### Room Database Configuration
+```kotlin
+// core-data/database/PlacesDatabase.kt
+@Database(
+    entities = [
+        PlaceEntity::class,
+        SearchHistoryEntity::class,
+        CachedLocationEntity::class
+    ],
+    version = 1,
+    exportSchema = true
+)
+@TypeConverters(Converters::class)
+abstract class PlacesDatabase : RoomDatabase() {
+    abstract fun placesDao(): PlacesDao
+    abstract fun searchHistoryDao(): SearchHistoryDao
+    
+    companion object {
+        const val DATABASE_NAME = "places_database"
+    }
+}
+
+// Dependency injection setup
+@Module
+@InstallIn(SingletonComponent::class)
+object DataModule {
+    @Provides
+    @Singleton
+    fun provideDatabase(@ApplicationContext context: Context): PlacesDatabase {
+        return Room.databaseBuilder(
+            context,
+            PlacesDatabase::class.java,
+            PlacesDatabase.DATABASE_NAME
+        )
+        .fallbackToDestructiveMigration()
+        .build()
+    }
+}
+```
+
+### DataStore Configuration
+```kotlin
+// core-data/datastore/PreferencesRepository.kt
+@Singleton
+class PreferencesRepository @Inject constructor(
+    @ApplicationContext private val context: Context
+) {
+    private val Context.dataStore by preferencesDataStore(
+        name = "user_preferences",
+        serializer = UserPreferencesSerializer
+    )
+    
+    val userPreferences: Flow<UserPreferences> = context.dataStore.data
+    
+    suspend fun updateLocationBias(enabled: Boolean) {
+        context.dataStore.updateData { preferences ->
+            preferences.toBuilder()
+                .setLocationBiasEnabled(enabled)
+                .build()
+        }
+    }
+    
+    suspend fun setApiKey(encryptedKey: String) {
+        // Store encrypted API key using Android Keystore
+        context.dataStore.updateData { preferences ->
+            preferences.toBuilder()
+                .setEncryptedApiKey(encryptedKey)
+                .build()
+        }
+    }
+}
+```
+
+### Repository Implementation Pattern
+```kotlin
+// core-data/repository/PlacesRepositoryImpl.kt
+@Singleton
+class PlacesRepositoryImpl @Inject constructor(
+    private val placesDao: PlacesDao,
+    private val placesApi: PlacesApi,
+    private val placeMapper: PlaceMapper,
+    private val cacheManager: CacheManager,
+    @IoDispatcher private val ioDispatcher: CoroutineDispatcher
+) : PlacesRepository {
+    
+    override fun getPlaces(query: String): Flow<Result<List<Place>>> = flow {
+        emit(Result.Loading)
+        
+        // Check cache first
+        val cachedPlaces = placesDao.searchPlaces(query)
+        if (cachedPlaces.isNotEmpty() && !cacheManager.isExpired(query)) {
+            emit(Result.Success(cachedPlaces.map { placeMapper.toDomain(it) }))
+            return@flow
+        }
+        
+        // Fetch from network
+        try {
+            val networkPlaces = placesApi.searchPlaces(query)
+            val entities = networkPlaces.map { placeMapper.toEntity(it) }
+            
+            // Update cache
+            placesDao.insertPlaces(entities)
+            cacheManager.updateTimestamp(query)
+            
+            emit(Result.Success(networkPlaces))
+        } catch (e: Exception) {
+            // Fallback to cache even if expired
+            if (cachedPlaces.isNotEmpty()) {
+                emit(Result.Success(
+                    cachedPlaces.map { placeMapper.toDomain(it) },
+                    isFromCache = true
+                ))
+            } else {
+                emit(Result.Error(e))
+            }
+        }
+    }.flowOn(ioDispatcher)
+}
+```
+
+### Caching Strategy
+```kotlin
+// core-data/util/CacheManager.kt
+@Singleton
+class CacheManager @Inject constructor(
+    private val preferencesRepository: PreferencesRepository
+) {
+    companion object {
+        const val DEFAULT_CACHE_DURATION_HOURS = 24
+        const val SEARCH_CACHE_DURATION_MINUTES = 30
+        const val LOCATION_CACHE_DURATION_DAYS = 7
+    }
+    
+    fun isExpired(key: String, type: CacheType = CacheType.SEARCH): Boolean {
+        val timestamp = getCacheTimestamp(key)
+        val currentTime = System.currentTimeMillis()
+        
+        return when (type) {
+            CacheType.SEARCH -> {
+                currentTime - timestamp > TimeUnit.MINUTES.toMillis(SEARCH_CACHE_DURATION_MINUTES)
+            }
+            CacheType.LOCATION -> {
+                currentTime - timestamp > TimeUnit.DAYS.toMillis(LOCATION_CACHE_DURATION_DAYS)
+            }
+            CacheType.PLACES -> {
+                currentTime - timestamp > TimeUnit.HOURS.toMillis(DEFAULT_CACHE_DURATION_HOURS)
+            }
+        }
+    }
+    
+    suspend fun clearExpiredCache() {
+        // Periodic cleanup of expired cache entries
+    }
+}
+```
+
+### Android Keystore Integration
+```kotlin
+// core-data/util/EncryptionHelper.kt
+@Singleton
+class EncryptionHelper @Inject constructor() {
+    private val keyAlias = "PlacesAppSecretKey"
+    
+    init {
+        generateKey()
+    }
+    
+    private fun generateKey() {
+        val keyGenerator = KeyGenerator.getInstance(
+            KeyProperties.KEY_ALGORITHM_AES,
+            "AndroidKeyStore"
+        )
+        
+        val keyGenParameterSpec = KeyGenParameterSpec.Builder(
+            keyAlias,
+            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+        )
+            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+            .build()
+        
+        keyGenerator.init(keyGenParameterSpec)
+        keyGenerator.generateKey()
+    }
+    
+    fun encrypt(plainText: String): ByteArray {
+        // Encrypt sensitive data using Android Keystore
+    }
+    
+    fun decrypt(encryptedData: ByteArray): String {
+        // Decrypt data using Android Keystore
+    }
+}
+```
+
+### Data Mappers
+```kotlin
+// core-data/mappers/PlaceMapper.kt
+@Singleton
+class PlaceMapper @Inject constructor() {
+    
+    fun toEntity(domain: Place): PlaceEntity {
+        return PlaceEntity(
+            placeId = domain.id,
+            name = domain.name,
+            address = domain.address,
+            latitude = domain.location.latitude,
+            longitude = domain.location.longitude,
+            types = domain.types,
+            timestamp = System.currentTimeMillis()
+        )
+    }
+    
+    fun toDomain(entity: PlaceEntity): Place {
+        return Place(
+            id = entity.placeId,
+            name = entity.name,
+            address = entity.address,
+            location = Location(
+                latitude = entity.latitude,
+                longitude = entity.longitude
+            ),
+            types = entity.types
+        )
+    }
+    
+    fun toEntityList(domains: List<Place>): List<PlaceEntity> {
+        return domains.map { toEntity(it) }
+    }
+    
+    fun toDomainList(entities: List<PlaceEntity>): List<Place> {
+        return entities.map { toDomain(it) }
+    }
+}
+```
+
+### Testing Core-Data Module
+```kotlin
+// Unit tests for DAOs
+@RunWith(AndroidJUnit4::class)
+class PlacesDaoTest {
+    @get:Rule
+    val instantTaskExecutorRule = InstantTaskExecutorRule()
+    
+    private lateinit var database: PlacesDatabase
+    private lateinit var placesDao: PlacesDao
+    
+    @Before
+    fun setup() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        database = Room.inMemoryDatabaseBuilder(
+            context,
+            PlacesDatabase::class.java
+        ).allowMainThreadQueries().build()
+        placesDao = database.placesDao()
+    }
+    
+    @Test
+    fun insertAndRetrievePlaces() = runTest {
+        // Given
+        val places = listOf(
+            createTestPlaceEntity("1", "Thrissur"),
+            createTestPlaceEntity("2", "Kochi")
+        )
+        
+        // When
+        placesDao.insertPlaces(places)
+        val retrieved = placesDao.getAllPlaces()
+        
+        // Then
+        assertEquals(2, retrieved.size)
+        assertEquals("Thrissur", retrieved[0].name)
+    }
+    
+    @After
+    fun tearDown() {
+        database.close()
+    }
+}
+
+// Repository tests with mocked dependencies
+@ExperimentalCoroutinesApi
+class PlacesRepositoryImplTest {
+    @get:Rule
+    val coroutineRule = MainCoroutineRule()
+    
+    @MockK
+    private lateinit var placesDao: PlacesDao
+    
+    @MockK
+    private lateinit var placesApi: PlacesApi
+    
+    @MockK
+    private lateinit var cacheManager: CacheManager
+    
+    private lateinit var repository: PlacesRepositoryImpl
+    
+    @Before
+    fun setup() {
+        MockKAnnotations.init(this)
+        repository = PlacesRepositoryImpl(
+            placesDao, 
+            placesApi, 
+            PlaceMapper(), 
+            cacheManager,
+            coroutineRule.testDispatcher
+        )
+    }
+    
+    @Test
+    fun `returns cached data when available and not expired`() = runTest {
+        // Test implementation
+    }
+}
+```
+
+### ProGuard Rules for Core-Data
+```pro
+# Room
+-keep class * extends androidx.room.RoomDatabase
+-keep @androidx.room.Entity class *
+-keepclassmembers class * {
+    @androidx.room.* <fields>;
+}
+
+# DataStore
+-keep class androidx.datastore.*.** {*;}
+
+# Keep your entities and DAOs
+-keep class com.places.autocomplete.core.data.database.entities.** { *; }
+-keep interface com.places.autocomplete.core.data.database.dao.** { *; }
+```
+
+### Build Configuration (build.gradle.kts)
+```kotlin
+// core-data/build.gradle.kts
+plugins {
+    alias(libs.plugins.android.library)
+    alias(libs.plugins.kotlin.android)
+    alias(libs.plugins.ksp)
+    alias(libs.plugins.hilt)
+    alias(libs.plugins.protobuf)
+}
+
+android {
+    namespace = "com.places.autocomplete.core.data"
+    compileSdk = 36
+    
+    defaultConfig {
+        minSdk = 28
+        
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        
+        // Export Room schemas for migration testing
+        javaCompileOptions {
+            annotationProcessorOptions {
+                arguments["room.schemaLocation"] = "$projectDir/schemas"
+            }
+        }
+    }
+}
+
+dependencies {
+    implementation(project(":core-domain"))
+    implementation(project(":core-network"))
+    
+    // Room
+    implementation(libs.androidx.room.runtime)
+    implementation(libs.androidx.room.ktx)
+    ksp(libs.androidx.room.compiler)
+    
+    // DataStore
+    implementation(libs.androidx.datastore)
+    implementation(libs.androidx.datastore.preferences)
+    implementation(libs.protobuf.kotlin.lite)
+    
+    // Hilt
+    implementation(libs.hilt.android)
+    ksp(libs.hilt.compiler)
+    
+    // Testing
+    testImplementation(libs.junit)
+    testImplementation(libs.mockk)
+    testImplementation(libs.kotlinx.coroutines.test)
+    androidTestImplementation(libs.androidx.room.testing)
+    androidTestImplementation(libs.androidx.test.runner)
+}
 ```
 
 ## Networking
@@ -368,3 +822,10 @@ Key points:
 - **Invalid coordinates**: Verify coordinate validation logic (lat: -90 to 90, lng: -180 to 180)
 - **Missing results**: Try fallback endpoints and check HTML parser patterns
 - **Encoding issues**: Ensure proper URL encoding with `URLEncoder.encode(address, "UTF-8")`
+
+### Data Layer Issues
+- **Room migration errors**: Check schema exports in `/schemas` directory and implement proper migration strategies
+- **DataStore corruption**: Clear app data or implement fallback to default preferences
+- **Cache invalidation**: Verify CacheManager TTL settings and cleanup jobs
+- **Encryption failures**: Check Android Keystore availability and fallback to unencrypted storage for non-sensitive data
+- **Memory leaks**: Use proper lifecycle-aware collectors (`collectAsStateWithLifecycle()`) and clean up observers
