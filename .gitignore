@@ -8,3 +8,8 @@
 .cxx
 local.properties
 secrets.properties
+
+# Node modules
+node_modules/
+package-lock.json
+package.json
