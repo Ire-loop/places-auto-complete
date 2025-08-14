@@ -1,4 +1,4 @@
-package com.example.places.core.network.api.routes
+package com.example.places.core.network.api
 
 import com.example.places.core.domain.model.RoutesRequest
 import com.example.places.core.domain.model.RoutesResponse
