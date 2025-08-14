@@ -1,6 +1,6 @@
 package com.example.places.core.network
 
-import com.example.places.core.network.api.routes.RoutesApi
+import com.example.places.core.network.api.RoutesApi
 import com.google.gson.Gson
 import com.google.gson.GsonBuilder
 import dagger.Module

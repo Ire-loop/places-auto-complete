@@ -8,7 +8,7 @@ import com.example.places.core.domain.model.RouteModifiers
 import com.example.places.core.domain.model.RoutesRequest
 import com.example.places.core.domain.model.Waypoint
 import com.example.places.core.domain.repository.RoutesRepository
-import com.example.places.core.network.api.routes.RoutesApi
+import com.example.places.core.network.api.RoutesApi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import javax.inject.Inject
