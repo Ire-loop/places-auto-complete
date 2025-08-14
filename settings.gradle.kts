@@ -7,8 +7,8 @@ pluginManagement {
                 includeGroupByRegex("androidx.*")
             }
         }
-        mavenCentral()
         gradlePluginPortal()
+        mavenCentral()
     }
 }
 dependencyResolutionManagement {
@@ -21,3 +21,6 @@ dependencyResolutionManagement {
 
 rootProject.name = "Places Autocomplete Demo"
 include(":app")
+include(":core-network")
+include(":core-domain")
+include(":core-data")
